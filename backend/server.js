@@ -504,3 +504,13 @@ app.listen(PORT, () => {
   console.log(`    Sources: Binance (crypto) + Yahoo Finance (forex/gold/indices)`);
   console.log(`    Health:  http://localhost:${PORT}/health\n`);
 });
+
+// ── Global error handlers ─────────────────────────────────────────────────────
+// Always return JSON — prevents HTML error pages reaching the extension
+app.use((req, res) => {
+  res.status(404).json({ error: `Route not found: ${req.method} ${req.path}` });
+});
+app.use((err, req, res, _next) => {
+  console.error('[Unhandled Error]', err);
+  res.status(500).json({ error: err.message || 'Internal server error' });
+});
