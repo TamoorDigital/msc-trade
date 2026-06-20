@@ -179,18 +179,39 @@ async function fetchBinancePrice(symbol) {
   return parseFloat(res.data.price);
 }
 
-// ── Bybit helpers (crypto fallback when Binance is blocked on cloud) ─────────
-// Binance blocks US cloud IPs (AWS/Render/Railway).
-async function fetchBybitCandles(symbol, interval, limit = 20) {
-  const intervalMap = { '1h': '60', '4h': '240', '15m': '15', '30m': '30', '1d': 'D' };
-  const res = await axios.get('https://api.bybit.com/v5/market/kline', {
-    params: { category: 'spot', symbol, interval: intervalMap[interval] || '60', limit },
+// ── Symbol helpers ────────────────────────────────────────────────────────────
+function parseCryptoSymbol(symbol) {
+  // "BTCUSDT" → { fsym:"BTC", tsym:"USDT" }
+  const quotes = ['USDT','USDC','BUSD','FDUSD','BTC','ETH','BNB'];
+  for (const q of quotes) {
+    if (symbol.toUpperCase().endsWith(q))
+      return { fsym: symbol.slice(0, -q.length).toUpperCase(), tsym: q };
+  }
+  return { fsym: symbol.slice(0,-4).toUpperCase(), tsym: symbol.slice(-4).toUpperCase() };
+}
+
+function toHyphenSymbol(symbol) {
+  // "BTCUSDT" → "BTC-USDT"  (used by Gate.io, KuCoin, OKX)
+  const { fsym, tsym } = parseCryptoSymbol(symbol);
+  return `${fsym}-${tsym}`;
+}
+
+function toUnderscoreSymbol(symbol) {
+  // "BTCUSDT" → "BTC_USDT"  (used by Gate.io)
+  const { fsym, tsym } = parseCryptoSymbol(symbol);
+  return `${fsym}_${tsym}`;
+}
+
+// ── Exchange 2: MEXC (same Binance API format, different IPs) ─────────────────
+async function fetchMEXCCandles(symbol, interval, limit = 20) {
+  const res = await axios.get('https://api.mexc.com/api/v3/klines', {
+    params: { symbol, interval, limit },
     timeout: 8000,
   });
-  const list = res.data?.result?.list;
-  if (!list || list.length === 0) throw new Error(`Bybit no data for ${symbol}`);
-  return list.reverse().map(c => ({
-    time:   new Date(parseInt(c[0])).toISOString().replace('T', ' ').slice(0, 16) + ' UTC',
+  if (!Array.isArray(res.data) || res.data.length === 0)
+    throw new Error(`MEXC no data for ${symbol}`);
+  return res.data.map(c => ({
+    time:   new Date(c[0]).toISOString().replace('T',' ').slice(0,16) + ' UTC',
     open:   parseFloat(c[1]),
     high:   parseFloat(c[2]),
     low:    parseFloat(c[3]),
@@ -199,56 +220,88 @@ async function fetchBybitCandles(symbol, interval, limit = 20) {
   }));
 }
 
-async function fetchBybitPrice(symbol) {
-  const res = await axios.get('https://api.bybit.com/v5/market/tickers', {
-    params: { category: 'spot', symbol },
-    timeout: 5000,
+async function fetchMEXCPrice(symbol) {
+  const res = await axios.get('https://api.mexc.com/api/v3/ticker/price', {
+    params: { symbol }, timeout: 5000,
   });
-  const price = res.data?.result?.list?.[0]?.lastPrice;
-  if (!price) throw new Error(`Bybit price not found for ${symbol}`);
-  return parseFloat(price);
+  return parseFloat(res.data.price);
 }
 
-// ── CryptoCompare helpers (final fallback — works from ALL cloud providers) ───
-// Free, no API key, developer-first API, never geo-blocked.
-// Docs: https://min-api.cryptocompare.com
-
-// Split "BTCUSDT" → { fsym: "BTC", tsym: "USDT" }
-function parseCryptoSymbol(symbol) {
-  const quotes = ['USDT', 'USDC', 'BUSD', 'FDUSD', 'BTC', 'ETH', 'BNB'];
-  for (const q of quotes) {
-    if (symbol.toUpperCase().endsWith(q)) {
-      return { fsym: symbol.slice(0, -q.length).toUpperCase(), tsym: q };
-    }
-  }
-  return { fsym: symbol.slice(0, -4).toUpperCase(), tsym: symbol.slice(-4).toUpperCase() };
+// ── Exchange 3: Gate.io ───────────────────────────────────────────────────────
+async function fetchGateCandles(symbol, interval, limit = 20) {
+  const barMap = { '1h':'1h', '4h':'4h', '15m':'15m', '1d':'1d' };
+  const res = await axios.get('https://api.gateio.ws/api/v4/spot/candlesticks', {
+    params: { currency_pair: toUnderscoreSymbol(symbol), interval: barMap[interval]||'1h', limit },
+    timeout: 8000,
+  });
+  if (!Array.isArray(res.data) || res.data.length === 0)
+    throw new Error(`Gate.io no data for ${symbol}`);
+  // Gate.io format: [time_sec, quote_vol, close, high, low, open]
+  return res.data.map(c => ({
+    time:   new Date(parseInt(c[0]) * 1000).toISOString().replace('T',' ').slice(0,16) + ' UTC',
+    open:   parseFloat(c[5]),
+    high:   parseFloat(c[3]),
+    low:    parseFloat(c[4]),
+    close:  parseFloat(c[2]),
+    volume: parseFloat(c[1]),
+  }));
 }
 
+async function fetchGatePrice(symbol) {
+  const res = await axios.get('https://api.gateio.ws/api/v4/spot/tickers', {
+    params: { currency_pair: toUnderscoreSymbol(symbol) }, timeout: 5000,
+  });
+  return parseFloat(res.data?.[0]?.last ?? 0);
+}
+
+// ── Exchange 4: KuCoin ────────────────────────────────────────────────────────
+async function fetchKuCoinCandles(symbol, interval, limit = 20) {
+  const typeMap = { '1h':'1hour', '4h':'4hour', '15m':'15min', '1d':'1day' };
+  // KuCoin needs startAt/endAt for limit — use endAt=now, startAt=now-limit*interval
+  const intervalSeconds = { '1h':3600, '4h':14400, '15m':900, '1d':86400 };
+  const endAt   = Math.floor(Date.now() / 1000);
+  const startAt = endAt - (limit + 5) * (intervalSeconds[interval] || 3600);
+
+  const res = await axios.get('https://api.kucoin.com/api/v1/market/candles', {
+    params: { symbol: toHyphenSymbol(symbol), type: typeMap[interval]||'1hour', startAt, endAt },
+    timeout: 8000,
+  });
+  const data = res.data?.data;
+  if (!data || data.length === 0) throw new Error(`KuCoin no data for ${symbol}`);
+  // KuCoin format: [time_sec, open, close, high, low, volume, amount] — newest first
+  return data.reverse().slice(-limit).map(c => ({
+    time:   new Date(parseInt(c[0]) * 1000).toISOString().replace('T',' ').slice(0,16) + ' UTC',
+    open:   parseFloat(c[1]),
+    high:   parseFloat(c[3]),
+    low:    parseFloat(c[4]),
+    close:  parseFloat(c[2]),
+    volume: parseFloat(c[5]),
+  }));
+}
+
+async function fetchKuCoinPrice(symbol) {
+  const res = await axios.get(`https://api.kucoin.com/api/v1/market/orderbook/level1`, {
+    params: { symbol: toHyphenSymbol(symbol) }, timeout: 5000,
+  });
+  return parseFloat(res.data?.data?.price ?? 0);
+}
+
+// ── Exchange 5: CryptoCompare (data aggregator, no exchange IP blocks) ────────
 async function fetchCCCandles(symbol, interval, limit = 20) {
   const { fsym, tsym } = parseCryptoSymbol(symbol);
-  // For 4H we fetch limit*4 hourly candles then aggregate
   const hoursNeeded = interval === '4h' ? limit * 4 : limit;
-
   const res = await axios.get('https://min-api.cryptocompare.com/data/v2/histohour', {
     params: { fsym, tsym, limit: hoursNeeded },
-    headers: { 'User-Agent': 'SMCAnalyzer/1.0' },
+    headers: { 'User-Agent': 'Mozilla/5.0' },
     timeout: 10000,
   });
-
   if (res.data.Response === 'Error') throw new Error(res.data.Message);
-
   const raw = res.data?.Data?.Data || [];
-  if (raw.length === 0) throw new Error(`CryptoCompare no data for ${fsym}/${tsym}`);
-
+  if (raw.length === 0) throw new Error(`CryptoCompare no data for ${fsym}`);
   const candles = raw.map(c => ({
-    time:   new Date(c.time * 1000).toISOString().replace('T', ' ').slice(0, 16) + ' UTC',
-    open:   c.open,
-    high:   c.high,
-    low:    c.low,
-    close:  c.close,
-    volume: c.volumefrom,
+    time:   new Date(c.time * 1000).toISOString().replace('T',' ').slice(0,16) + ' UTC',
+    open:   c.open, high: c.high, low: c.low, close: c.close, volume: c.volumefrom,
   }));
-
   if (interval === '4h') return aggregateTo4H(candles).slice(-limit);
   return candles.slice(-limit);
 }
@@ -256,35 +309,47 @@ async function fetchCCCandles(symbol, interval, limit = 20) {
 async function fetchCCPrice(symbol) {
   const { fsym, tsym } = parseCryptoSymbol(symbol);
   const res = await axios.get('https://min-api.cryptocompare.com/data/price', {
-    params: { fsym, tsyms: tsym },
-    headers: { 'User-Agent': 'SMCAnalyzer/1.0' },
-    timeout: 5000,
+    params: { fsym, tsyms: tsym }, headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 5000,
   });
   return res.data[tsym] ?? null;
 }
 
-// ── Crypto fetch: Binance → Bybit → CryptoCompare ────────────────────────────
+// ── Master crypto fetch: tries 5 exchanges in order ──────────────────────────
+// One of these WILL work regardless of cloud provider IP restrictions.
+const CRYPTO_SOURCES = [
+  { name: 'Binance',       candles: fetchBinanceCandles, price: fetchBinancePrice },
+  { name: 'MEXC',          candles: fetchMEXCCandles,    price: fetchMEXCPrice    },
+  { name: 'Gate.io',       candles: fetchGateCandles,    price: fetchGatePrice    },
+  { name: 'KuCoin',        candles: fetchKuCoinCandles,  price: fetchKuCoinPrice  },
+  { name: 'CryptoCompare', candles: fetchCCCandles,      price: fetchCCPrice      },
+];
+
 async function fetchCryptoCandles(symbol, interval, limit = 20) {
-  try {
-    return await fetchBinanceCandles(symbol, interval, limit);
-  } catch (e) {
-    console.log(`[Binance] ${e.message} — trying Bybit...`);
+  const errors = [];
+  for (const src of CRYPTO_SOURCES) {
+    try {
+      const data = await src.candles(symbol, interval, limit);
+      if (data && data.length > 0) {
+        if (src.name !== 'Binance') console.log(`[Data] Using ${src.name} for ${symbol}`);
+        return data;
+      }
+    } catch (e) {
+      console.log(`[${src.name}] ${e.response?.status || ''} ${e.message}`);
+      errors.push(`${src.name}: ${e.message}`);
+    }
   }
-  try {
-    return await fetchBybitCandles(symbol, interval, limit);
-  } catch (e) {
-    console.log(`[Bybit] ${e.message} — trying CryptoCompare...`);
-  }
-  // CryptoCompare works from all cloud providers
-  return await fetchCCCandles(symbol, interval, limit);
+  throw new Error(`All sources failed for ${symbol}:\n${errors.join('\n')}`);
 }
 
 async function fetchCryptoPrice(symbol) {
-  try { return await fetchBinancePrice(symbol); } catch (_) {}
-  try { return await fetchBybitPrice(symbol); }  catch (_) {}
-  return await fetchCCPrice(symbol);
+  for (const src of CRYPTO_SOURCES) {
+    try {
+      const p = await src.price(symbol);
+      if (p && p > 0) return p;
+    } catch (_) {}
+  }
+  return null;
 }
-
 
 
 // ── Yahoo Finance helpers (Forex / Gold / Indices) ────────────────────────────
