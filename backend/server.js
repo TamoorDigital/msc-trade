@@ -722,22 +722,17 @@ app.get('/test-ai', async (_req, res) => {
     );
   } catch (err) {
     return res.status(502).json({
-      test:    'FAILED',
-      error:   err.response?.data || err.message,
-      status:  err.response?.status,
-      hint:    'AgentRouter call threw an exception',
+      test:   'FAILED — threw error',
+      error:  err.response?.data || err.message,
+      status: err.response?.status,
     });
   }
 
-  const text = apiRes.data?.content?.[0]?.text || '';
+  // Return EVERYTHING so we can see the real response structure
   return res.json({
-    test:        text ? 'PASSED ✅' : 'FAILED — empty content ❌',
-    reply:       text,
-    stop_reason: apiRes.data?.stop_reason,
-    model:       apiRes.data?.model,
-    usage:       apiRes.data?.usage,
-    raw_content: apiRes.data?.content,
-    status_code: apiRes.status,
+    http_status:  apiRes.status,
+    FULL_RESPONSE: apiRes.data,
+    keys_in_data: Object.keys(apiRes.data || {}),
   });
 });
 
