@@ -179,6 +179,60 @@ async function fetchBinancePrice(symbol) {
   return parseFloat(res.data.price);
 }
 
+// ── Bybit helpers (crypto fallback when Binance is blocked on cloud) ─────────
+// Binance blocks US cloud IPs (AWS/Render/Railway). Bybit does not.
+async function fetchBybitCandles(symbol, interval, limit = 20) {
+  // Bybit interval map: '1h' → '60', '4h' → '240'
+  const intervalMap = { '1h': '60', '4h': '240', '15m': '15', '30m': '30', '1d': 'D' };
+  const bybitInterval = intervalMap[interval] || '60';
+
+  const res = await axios.get('https://api.bybit.com/v5/market/kline', {
+    params: { category: 'spot', symbol, interval: bybitInterval, limit },
+    timeout: 8000,
+  });
+
+  const list = res.data?.result?.list;
+  if (!list || list.length === 0) throw new Error(`Bybit returned no data for ${symbol}`);
+
+  // Bybit returns newest-first → reverse to get oldest-first
+  return list.reverse().map(c => ({
+    time:   new Date(parseInt(c[0])).toISOString().replace('T', ' ').slice(0, 16) + ' UTC',
+    open:   parseFloat(c[1]),
+    high:   parseFloat(c[2]),
+    low:    parseFloat(c[3]),
+    close:  parseFloat(c[4]),
+    volume: parseFloat(c[5]),
+  }));
+}
+
+async function fetchBybitPrice(symbol) {
+  const res = await axios.get('https://api.bybit.com/v5/market/tickers', {
+    params: { category: 'spot', symbol },
+    timeout: 5000,
+  });
+  const price = res.data?.result?.list?.[0]?.lastPrice;
+  if (!price) throw new Error(`Bybit price not found for ${symbol}`);
+  return parseFloat(price);
+}
+
+// ── Crypto fetch with auto-fallback: Binance → Bybit ─────────────────────────
+async function fetchCryptoCandles(symbol, interval, limit = 20) {
+  try {
+    return await fetchBinanceCandles(symbol, interval, limit);
+  } catch (e) {
+    console.log(`[Binance blocked/failed] Trying Bybit for ${symbol} ${interval}...`);
+    return await fetchBybitCandles(symbol, interval, limit);
+  }
+}
+
+async function fetchCryptoPrice(symbol) {
+  try {
+    return await fetchBinancePrice(symbol);
+  } catch (e) {
+    return await fetchBybitPrice(symbol);
+  }
+}
+
 // ── Yahoo Finance helpers (Forex / Gold / Indices) ────────────────────────────
 //
 // Symbol mapping for Yahoo Finance:
@@ -376,10 +430,11 @@ app.post('/analyze', async (req, res) => {
 
   try {
     if (dataSource === 'binance') {
+      // fetchCryptoCandles auto-falls back: Binance → Bybit
       [candles4H, candles1H, currentPrice] = await Promise.all([
-        fetchBinanceCandles(cleanSymbol, '4h', 20),
-        fetchBinanceCandles(cleanSymbol, '1h', 20),
-        fetchBinancePrice(cleanSymbol),
+        fetchCryptoCandles(cleanSymbol, '4h', 20),
+        fetchCryptoCandles(cleanSymbol, '1h', 20),
+        fetchCryptoPrice(cleanSymbol),
       ]);
     } else {
       // Forex / Gold / Indices → Yahoo Finance
@@ -393,25 +448,15 @@ app.post('/analyze', async (req, res) => {
     const detail = err.response?.data?.msg || err.message;
     console.error('[Data Fetch Error]', detail);
 
-    // If Binance failed, try Yahoo as last resort
     if (dataSource === 'binance') {
-      try {
-        console.log(`[Analyze] Binance failed, trying Yahoo for ${cleanSymbol}...`);
-        [candles4H, candles1H] = await Promise.all([
-          fetchYahooCandles(cleanSymbol, '4h', 20),
-          fetchYahooCandles(cleanSymbol, '1h', 20),
-        ]);
-        currentPrice = candles1H[candles1H.length - 1]?.close ?? null;
-      } catch (yahooErr) {
-        return res.status(400).json({
-          error: `Could not fetch data for "${cleanSymbol}" from Binance or Yahoo Finance. ` +
-                 `Check the symbol is correct. Supported: BTCUSDT, GBPUSD, XAUUSD, EURUSD, NAS100, US30.`,
-        });
-      }
+      return res.status(400).json({
+        error: `Could not fetch candles for "${cleanSymbol}" from Binance or Bybit.\n` +
+               `Make sure the symbol is a valid spot pair (e.g. BTCUSDT, ETHUSDT, SOLUSDT).`,
+      });
     } else {
       return res.status(400).json({
-        error: `Yahoo Finance data fetch failed for "${cleanSymbol}": ${detail}. ` +
-               `Check symbol is correct. Forex pairs like GBPUSD, EURUSD, XAUUSD, USDJPY are supported.`,
+        error: `Could not fetch candles for "${cleanSymbol}" from Yahoo Finance.\n` +
+               `Supported forex: GBPUSD, EURUSD, USDJPY, XAUUSD. Indices: NAS100, US30, SPX500.`,
       });
     }
   }
@@ -422,7 +467,7 @@ app.post('/analyze', async (req, res) => {
   // ── Build user message ──
   const userText = `
 Symbol: ${cleanSymbol}
-Asset Type: ${dataSource === 'binance' ? 'Crypto (Binance)' : 'Forex / Commodity / Index (Yahoo Finance)'}
+Asset Type: ${dataSource === 'binance' ? 'Crypto (Binance/Bybit)' : 'Forex / Commodity / Index (Yahoo Finance)'}
 Current Price: ${currentPrice != null ? currentPrice : 'See chart'}
 Timestamp: ${timestamp}
 Session: ${session}
