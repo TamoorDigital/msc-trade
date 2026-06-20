@@ -180,21 +180,15 @@ async function fetchBinancePrice(symbol) {
 }
 
 // ── Bybit helpers (crypto fallback when Binance is blocked on cloud) ─────────
-// Binance blocks US cloud IPs (AWS/Render/Railway). Bybit does not.
+// Binance blocks US cloud IPs (AWS/Render/Railway).
 async function fetchBybitCandles(symbol, interval, limit = 20) {
-  // Bybit interval map: '1h' → '60', '4h' → '240'
   const intervalMap = { '1h': '60', '4h': '240', '15m': '15', '30m': '30', '1d': 'D' };
-  const bybitInterval = intervalMap[interval] || '60';
-
   const res = await axios.get('https://api.bybit.com/v5/market/kline', {
-    params: { category: 'spot', symbol, interval: bybitInterval, limit },
+    params: { category: 'spot', symbol, interval: intervalMap[interval] || '60', limit },
     timeout: 8000,
   });
-
   const list = res.data?.result?.list;
-  if (!list || list.length === 0) throw new Error(`Bybit returned no data for ${symbol}`);
-
-  // Bybit returns newest-first → reverse to get oldest-first
+  if (!list || list.length === 0) throw new Error(`Bybit no data for ${symbol}`);
   return list.reverse().map(c => ({
     time:   new Date(parseInt(c[0])).toISOString().replace('T', ' ').slice(0, 16) + ' UTC',
     open:   parseFloat(c[1]),
@@ -215,23 +209,83 @@ async function fetchBybitPrice(symbol) {
   return parseFloat(price);
 }
 
-// ── Crypto fetch with auto-fallback: Binance → Bybit ─────────────────────────
+// ── CryptoCompare helpers (final fallback — works from ALL cloud providers) ───
+// Free, no API key, developer-first API, never geo-blocked.
+// Docs: https://min-api.cryptocompare.com
+
+// Split "BTCUSDT" → { fsym: "BTC", tsym: "USDT" }
+function parseCryptoSymbol(symbol) {
+  const quotes = ['USDT', 'USDC', 'BUSD', 'FDUSD', 'BTC', 'ETH', 'BNB'];
+  for (const q of quotes) {
+    if (symbol.toUpperCase().endsWith(q)) {
+      return { fsym: symbol.slice(0, -q.length).toUpperCase(), tsym: q };
+    }
+  }
+  return { fsym: symbol.slice(0, -4).toUpperCase(), tsym: symbol.slice(-4).toUpperCase() };
+}
+
+async function fetchCCCandles(symbol, interval, limit = 20) {
+  const { fsym, tsym } = parseCryptoSymbol(symbol);
+  // For 4H we fetch limit*4 hourly candles then aggregate
+  const hoursNeeded = interval === '4h' ? limit * 4 : limit;
+
+  const res = await axios.get('https://min-api.cryptocompare.com/data/v2/histohour', {
+    params: { fsym, tsym, limit: hoursNeeded },
+    headers: { 'User-Agent': 'SMCAnalyzer/1.0' },
+    timeout: 10000,
+  });
+
+  if (res.data.Response === 'Error') throw new Error(res.data.Message);
+
+  const raw = res.data?.Data?.Data || [];
+  if (raw.length === 0) throw new Error(`CryptoCompare no data for ${fsym}/${tsym}`);
+
+  const candles = raw.map(c => ({
+    time:   new Date(c.time * 1000).toISOString().replace('T', ' ').slice(0, 16) + ' UTC',
+    open:   c.open,
+    high:   c.high,
+    low:    c.low,
+    close:  c.close,
+    volume: c.volumefrom,
+  }));
+
+  if (interval === '4h') return aggregateTo4H(candles).slice(-limit);
+  return candles.slice(-limit);
+}
+
+async function fetchCCPrice(symbol) {
+  const { fsym, tsym } = parseCryptoSymbol(symbol);
+  const res = await axios.get('https://min-api.cryptocompare.com/data/price', {
+    params: { fsym, tsyms: tsym },
+    headers: { 'User-Agent': 'SMCAnalyzer/1.0' },
+    timeout: 5000,
+  });
+  return res.data[tsym] ?? null;
+}
+
+// ── Crypto fetch: Binance → Bybit → CryptoCompare ────────────────────────────
 async function fetchCryptoCandles(symbol, interval, limit = 20) {
   try {
     return await fetchBinanceCandles(symbol, interval, limit);
   } catch (e) {
-    console.log(`[Binance blocked/failed] Trying Bybit for ${symbol} ${interval}...`);
-    return await fetchBybitCandles(symbol, interval, limit);
+    console.log(`[Binance] ${e.message} — trying Bybit...`);
   }
+  try {
+    return await fetchBybitCandles(symbol, interval, limit);
+  } catch (e) {
+    console.log(`[Bybit] ${e.message} — trying CryptoCompare...`);
+  }
+  // CryptoCompare works from all cloud providers
+  return await fetchCCCandles(symbol, interval, limit);
 }
 
 async function fetchCryptoPrice(symbol) {
-  try {
-    return await fetchBinancePrice(symbol);
-  } catch (e) {
-    return await fetchBybitPrice(symbol);
-  }
+  try { return await fetchBinancePrice(symbol); } catch (_) {}
+  try { return await fetchBybitPrice(symbol); }  catch (_) {}
+  return await fetchCCPrice(symbol);
 }
+
+
 
 // ── Yahoo Finance helpers (Forex / Gold / Indices) ────────────────────────────
 //
