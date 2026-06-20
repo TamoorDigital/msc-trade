@@ -604,7 +604,7 @@ Please analyze all provided data — chart image + candles — and return your t
       `${AGENTROUTER_BASE_URL}/v1/messages`,
       {
         model:      'claude-opus-4-8',
-        max_tokens: 1500,
+        max_tokens: 2000,
         system:     SYSTEM_PROMPT,
         messages: [
           {
@@ -634,12 +634,45 @@ Please analyze all provided data — chart image + candles — and return your t
     );
   } catch (err) {
     const apiErr = err.response?.data?.error?.message || err.response?.data || err.message;
-    console.error('[AgentRouter Error]', apiErr);
+    console.error('[AgentRouter Error]', JSON.stringify(apiErr));
     return res.status(502).json({ error: `AgentRouter API error: ${JSON.stringify(apiErr)}` });
   }
 
-  const rawText = apiRes.data?.content?.[0]?.text || '';
-  if (!rawText) return res.status(502).json({ error: 'Empty response from AI model.' });
+  // Log full response structure (visible in Render logs — helps debug)
+  console.log('[AgentRouter] status:', apiRes.status);
+  console.log('[AgentRouter] stop_reason:', apiRes.data?.stop_reason);
+  console.log('[AgentRouter] content blocks:', apiRes.data?.content?.length);
+  console.log('[AgentRouter] usage:', JSON.stringify(apiRes.data?.usage));
+
+  // Extract text from content blocks — handle all block types robustly
+  let rawText = '';
+  const contentBlocks = apiRes.data?.content || [];
+
+  for (const block of contentBlocks) {
+    if (block.type === 'text' && block.text) {
+      rawText += block.text;
+    }
+  }
+
+  // Fallback: some router wrappers return flat string instead of blocks
+  if (!rawText && typeof apiRes.data?.content === 'string') {
+    rawText = apiRes.data.content;
+  }
+  if (!rawText && typeof apiRes.data?.completion === 'string') {
+    rawText = apiRes.data.completion;
+  }
+
+  if (!rawText) {
+    // Log full response so user can see in Render logs what went wrong
+    console.error('[Empty Response] Full data:', JSON.stringify(apiRes.data).slice(0, 800));
+    return res.status(502).json({
+      error: 'Empty response from AI model. Check Render logs for full response details.',
+      hint:  'Verify AGENTROUTER_API_KEY is valid and has credits at agentrouter.org/console',
+      debug: JSON.stringify(apiRes.data).slice(0, 300),
+    });
+  }
+
+  console.log('[AgentRouter] Text length:', rawText.length, '| Preview:', rawText.slice(0, 80));
 
   const signal = parseSignal(rawText);
   signal.symbol       = cleanSymbol;
@@ -655,10 +688,56 @@ Please analyze all provided data — chart image + candles — and return your t
 app.get('/health', (_req, res) => {
   res.json({
     status:  'ok',
+    version: '2.0',
     model:   'claude-opus-4-8',
     router:  AGENTROUTER_BASE_URL,
     apiKey:  AGENTROUTER_KEY ? '✓ set' : '✗ missing',
-    sources: ['binance (crypto)', 'yahoo finance (forex/gold/indices)'],
+  });
+});
+
+// ── Test AI endpoint — open in browser to diagnose AgentRouter ────────────────
+// URL: https://your-render-url.onrender.com/test-ai
+app.get('/test-ai', async (_req, res) => {
+  if (!AGENTROUTER_KEY) {
+    return res.status(500).json({ error: 'AGENTROUTER_API_KEY not set in environment' });
+  }
+
+  let apiRes;
+  try {
+    apiRes = await axios.post(
+      `${AGENTROUTER_BASE_URL}/v1/messages`,
+      {
+        model:      'claude-opus-4-8',
+        max_tokens: 50,
+        messages:   [{ role: 'user', content: 'Reply with exactly: WORKING' }],
+      },
+      {
+        headers: {
+          'x-api-key':         AGENTROUTER_KEY,
+          'anthropic-version': '2023-06-01',
+          'content-type':      'application/json',
+        },
+        timeout: 30000,
+      }
+    );
+  } catch (err) {
+    return res.status(502).json({
+      test:    'FAILED',
+      error:   err.response?.data || err.message,
+      status:  err.response?.status,
+      hint:    'AgentRouter call threw an exception',
+    });
+  }
+
+  const text = apiRes.data?.content?.[0]?.text || '';
+  return res.json({
+    test:        text ? 'PASSED ✅' : 'FAILED — empty content ❌',
+    reply:       text,
+    stop_reason: apiRes.data?.stop_reason,
+    model:       apiRes.data?.model,
+    usage:       apiRes.data?.usage,
+    raw_content: apiRes.data?.content,
+    status_code: apiRes.status,
   });
 });
 
