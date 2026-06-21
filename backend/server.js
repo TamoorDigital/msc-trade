@@ -489,40 +489,85 @@ function getSession() {
   return 'Off-Session';
 }
 
-// ── Signal parser ─────────────────────────────────────────────────────────────
+// ── Signal parser — flexible regex handles Gemini's varied output style ───────
 function parseSignal(text) {
   const result = { rawText: text };
 
-  const tradeMatch = text.match(/TRADE:\s*(LONG|SHORT|WAIT)/i);
+  // ── Trade direction ──
+  // Handles: "TRADE: LONG", "**TRADE:** SHORT", "Trade: WAIT", "DIRECTION: LONG"
+  const tradeMatch = text.match(/(?:TRADE|DIRECTION)[*\s:]+\*{0,2}(LONG|SHORT|WAIT)/i);
   result.trade = tradeMatch ? tradeMatch[1].toUpperCase() : 'WAIT';
 
-  const extractPrice = pattern => {
-    const m = text.match(pattern);
-    if (!m) return null;
-    return parseFloat(m[1].replace(/[$,\s]/g, ''));
+  // ── Price extractor — tries multiple label patterns ──
+  const firstPrice = (...patterns) => {
+    for (const pat of patterns) {
+      const m = text.match(pat);
+      if (m?.[1]) return parseFloat(m[1].replace(/[$,\s*]/g, ''));
+    }
+    return null;
   };
 
   if (result.trade !== 'WAIT') {
-    result.entry    = extractPrice(/ENTRY:\s*\$?([\d,]+(?:\.\d+)?)/i);
-    result.stopLoss = extractPrice(/STOP\s*LOSS:\s*\$?([\d,]+(?:\.\d+)?)/i);
-    result.tp1      = extractPrice(/TAKE\s*PROFIT\s*1:\s*\$?([\d,]+(?:\.\d+)?)/i);
-    result.tp2      = extractPrice(/TAKE\s*PROFIT\s*2:\s*\$?([\d,]+(?:\.\d+)?)/i);
-    result.tp3      = extractPrice(/TAKE\s*PROFIT\s*3:\s*\$?([\d,]+(?:\.\d+)?)/i);
 
-    const rrM = text.match(/RISK\s*REWARD:\s*([\d.:]+)/i);
-    result.riskReward = rrM ? rrM[1].trim() : null;
+    result.entry = firstPrice(
+      /ENTRY[*\s:]+\*{0,2}\$?([\d,]+(?:\.\d+)?)/i,
+      /Entry\s*Price[*\s:]+\$?([\d,]+(?:\.\d+)?)/i,
+    );
 
-    const probM = text.match(/PROBABILITY:\s*([\d.]+)\s*%?/i);
-    result.probability = probM ? parseFloat(probM[1]) : null;
+    result.stopLoss = firstPrice(
+      /STOP[\s*-]*LOSS[*\s:]+\*{0,2}\$?([\d,]+(?:\.\d+)?)/i,
+      /\bSL[*\s:]+\$?([\d,]+(?:\.\d+)?)/i,
+      /Stop[*\s:]+\$?([\d,]+(?:\.\d+)?)/i,
+    );
 
-    const rIdx = text.search(/REASONING:/i);
-    if (rIdx !== -1) result.reasoning = text.slice(rIdx + 10).trim();
+    result.tp1 = firstPrice(
+      /TAKE[\s*]*PROFIT[\s*]*1[*\s:]+\*{0,2}\$?([\d,]+(?:\.\d+)?)/i,
+      /\bTP[\s*]*1[*\s:]+\$?([\d,]+(?:\.\d+)?)/i,
+      /\bTP1[*\s:]+\$?([\d,]+(?:\.\d+)?)/i,
+      /Target[\s*]*1[*\s:]+\$?([\d,]+(?:\.\d+)?)/i,
+      /1st[\s*]*(?:Take[\s*]*Profit|Target|TP)[*\s:]+\$?([\d,]+(?:\.\d+)?)/i,
+    );
+
+    result.tp2 = firstPrice(
+      /TAKE[\s*]*PROFIT[\s*]*2[*\s:]+\*{0,2}\$?([\d,]+(?:\.\d+)?)/i,
+      /\bTP[\s*]*2[*\s:]+\$?([\d,]+(?:\.\d+)?)/i,
+      /\bTP2[*\s:]+\$?([\d,]+(?:\.\d+)?)/i,
+      /Target[\s*]*2[*\s:]+\$?([\d,]+(?:\.\d+)?)/i,
+      /2nd[\s*]*(?:Take[\s*]*Profit|Target|TP)[*\s:]+\$?([\d,]+(?:\.\d+)?)/i,
+    );
+
+    result.tp3 = firstPrice(
+      /TAKE[\s*]*PROFIT[\s*]*3[*\s:]+\*{0,2}\$?([\d,]+(?:\.\d+)?)/i,
+      /\bTP[\s*]*3[*\s:]+\$?([\d,]+(?:\.\d+)?)/i,
+      /\bTP3[*\s:]+\$?([\d,]+(?:\.\d+)?)/i,
+      /Target[\s*]*3[*\s:]+\$?([\d,]+(?:\.\d+)?)/i,
+      /3rd[\s*]*(?:Take[\s*]*Profit|Target|TP)[*\s:]+\$?([\d,]+(?:\.\d+)?)/i,
+    );
+
+    // Risk:Reward — handles "1:3", "1:2.5", "1 : 3", "R:R 1:3"
+    const rrM = text.match(/(?:RISK[\s*/]*REWARD|R[:/]R|RR)[*\s:]+\*{0,2}([\d]+\s*[:/]\s*[\d.]+)/i);
+    if (rrM) result.riskReward = rrM[1].replace(/\s/g, '');
+
+    // Probability — handles "75%", "75", "~75%", "Probability: 75%"
+    const probM = text.match(/PROBABILITY[*\s:]+\*{0,2}~?([\d.]+)\s*%?/i);
+    if (probM) result.probability = parseFloat(probM[1]);
+
+    // Reasoning — grab everything after the label
+    const rIdx = text.search(/REASONING[*\s:]*/i);
+    if (rIdx !== -1) {
+      result.reasoning = text
+        .slice(rIdx)
+        .replace(/^REASONING[*\s:]*/i, '')
+        .trim();
+    }
+
   } else {
-    const reasonM = text.match(/REASON:([\s\S]+?)(?:WHAT\s*TO\s*WATCH:|$)/i);
-    if (reasonM) result.reason = reasonM[1].trim();
+    // WAIT
+    const reasonM = text.match(/REASON[*\s:]*([\s\S]+?)(?:WHAT\s*TO\s*WATCH|$)/i);
+    if (reasonM) result.reason = reasonM[1].replace(/^[*\s:]+/, '').trim();
 
-    const watchM = text.match(/WHAT\s*TO\s*WATCH:([\s\S]+?)$/i);
-    if (watchM) result.watchFor = watchM[1].trim();
+    const watchM = text.match(/WHAT\s*TO\s*WATCH[*\s:]*([\s\S]+?)$/i);
+    if (watchM) result.watchFor = watchM[1].replace(/^[*\s:]+/, '').trim();
   }
 
   return result;
@@ -673,6 +718,7 @@ Please analyze all provided data — chart image + candles — and return your t
   signal.timestamp    = timestamp;
   signal.session      = session;
   signal.dataSource   = dataSource;
+  signal._raw         = rawText; // temp: remove after confirming parsing works
 
   return res.json(signal);
 });
