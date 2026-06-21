@@ -10,7 +10,7 @@ const app  = express();
 const PORT = process.env.PORT || 3000;
 
 const GEMINI_KEY      = process.env.GEMINI_API_KEY;
-const GEMINI_MODEL    = 'gemini-2.5-flash';   // Free: 1500 req/day, great vision+analysis
+const GEMINI_MODEL    = 'gemini-1.5-pro';   // Free: 1500 req/day, great vision+analysis
 const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
 
 app.use(cors());
