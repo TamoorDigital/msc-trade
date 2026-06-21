@@ -96,13 +96,26 @@ If WAIT:
 TRADE: WAIT
 
 REASON:
+* Why no valid setup exists right now (be specific about what is missing)
 
-* Why no valid setup exists
+LONG SETUP:
+* Trigger: [exact price level OR condition that would make a long valid]
+* Confirmation: [candle pattern / timeframe signal required, e.g. "4H closes green above 63800"]
+* Entry: [price]
+* Stop Loss: [price]
+* Take Profit 1: [price]
+* Take Profit 2: [price]
+
+SHORT SETUP:
+* Trigger: [exact price level OR condition that would make a short valid]
+* Confirmation: [candle pattern / timeframe signal required, e.g. "4H bearish rejection at 64500"]
+* Entry: [price]
+* Stop Loss: [price]
+* Take Profit 1: [price]
+* Take Profit 2: [price]
 
 WHAT TO WATCH:
-
-* Key levels
-* Conditions required for trade
+* Key levels to monitor
 
 IMPORTANT RULES:
 
@@ -562,9 +575,30 @@ function parseSignal(text) {
     }
 
   } else {
-    // WAIT
-    const reasonM = text.match(/REASON[*\s:]*([\s\S]+?)(?:WHAT\s*TO\s*WATCH|$)/i);
+    // ── WAIT parsing ──
+    const reasonM = text.match(/REASON[*\s:]*([\s\S]+?)(?:LONG\s*SETUP|SHORT\s*SETUP|WHAT\s*TO\s*WATCH|$)/i);
     if (reasonM) result.reason = reasonM[1].replace(/^[*\s:]+/, '').trim();
+
+    // Extract LONG SETUP block
+    const longIdx = text.search(/LONG\s*SETUP/i);
+    if (longIdx !== -1) {
+      const nextIdx = text.search(/SHORT\s*SETUP|WHAT\s*TO\s*WATCH/i);
+      result.longSetup = text
+        .slice(longIdx, nextIdx !== -1 ? nextIdx : undefined)
+        .replace(/^LONG\s*SETUP[*\s:\-—]*/i, '')
+        .trim();
+    }
+
+    // Extract SHORT SETUP block
+    const shortIdx = text.search(/SHORT\s*SETUP/i);
+    if (shortIdx !== -1) {
+      const afterShort = text.slice(shortIdx);
+      const endIdx = afterShort.search(/\nWHAT\s*TO\s*WATCH/i);
+      result.shortSetup = afterShort
+        .slice(0, endIdx !== -1 ? endIdx : undefined)
+        .replace(/^SHORT\s*SETUP[*\s:\-—]*/i, '')
+        .trim();
+    }
 
     const watchM = text.match(/WHAT\s*TO\s*WATCH[*\s:]*([\s\S]+?)$/i);
     if (watchM) result.watchFor = watchM[1].replace(/^[*\s:]+/, '').trim();
