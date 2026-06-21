@@ -9,8 +9,9 @@ const cors    = require('cors');
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
-const AGENTROUTER_KEY      = process.env.AGENTROUTER_API_KEY;
-const AGENTROUTER_BASE_URL = 'https://agentrouter.org';
+const GEMINI_KEY      = process.env.GEMINI_API_KEY;
+const GEMINI_MODEL    = 'gemini-2.0-flash';   // Free: 1500 req/day, great vision+analysis
+const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
 
 app.use(cors());
 app.use(express.json({ limit: '15mb' }));
@@ -533,8 +534,8 @@ app.post('/analyze', async (req, res) => {
 
   if (!symbol)     return res.status(400).json({ error: 'Missing symbol' });
   if (!screenshot) return res.status(400).json({ error: 'Missing screenshot' });
-  if (!AGENTROUTER_KEY) {
-    return res.status(500).json({ error: 'AGENTROUTER_API_KEY not set in .env — see setup guide.' });
+  if (!GEMINI_KEY) {
+    return res.status(500).json({ error: 'GEMINI_API_KEY not set in environment variables.' });
   }
 
   // Normalize: strip exchange prefix + perpetual suffixes (.P, PERP, etc.)
@@ -597,82 +598,74 @@ The chart screenshot above shows the current TradingView chart (15-minute timefr
 Please analyze all provided data — chart image + candles — and return your trade signal.
 `.trim();
 
-  // ── Call AgentRouter ──
+  // ── Call Gemini API ──
+  if (!GEMINI_KEY) {
+    return res.status(500).json({ error: 'GEMINI_API_KEY not set in environment variables.' });
+  }
+
   let apiRes;
   try {
     apiRes = await axios.post(
-      `${AGENTROUTER_BASE_URL}/v1/messages`,
+      `${GEMINI_BASE_URL}/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_KEY}`,
       {
-        model:      'claude-opus-4-8',
-        max_tokens: 2000,
-        system:     SYSTEM_PROMPT,
-        messages: [
+        // System prompt
+        system_instruction: {
+          parts: [{ text: SYSTEM_PROMPT }]
+        },
+        // User message: image first, then candle data text
+        contents: [
           {
             role: 'user',
-            content: [
+            parts: [
               {
-                type: 'image',
-                source: {
-                  type:       'base64',
-                  media_type: mediaType || 'image/jpeg',
-                  data:       screenshot,
-                },
+                inline_data: {
+                  mime_type: mediaType || 'image/jpeg',
+                  data:      screenshot,
+                }
               },
-              { type: 'text', text: userText },
-            ],
-          },
+              { text: userText }
+            ]
+          }
+        ],
+        generationConfig: {
+          maxOutputTokens: 2000,
+          temperature:     0.1,
+          topP:            0.95,
+        },
+        // Prevent safety filters blocking trading content
+        safetySettings: [
+          { category: 'HARM_CATEGORY_HARASSMENT',        threshold: 'BLOCK_ONLY_HIGH' },
+          { category: 'HARM_CATEGORY_HATE_SPEECH',       threshold: 'BLOCK_ONLY_HIGH' },
+          { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_ONLY_HIGH' },
+          { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_ONLY_HIGH' },
         ],
       },
-      {
-        headers: {
-          'x-api-key':         AGENTROUTER_KEY,
-          'anthropic-version': '2023-06-01',
-          'content-type':      'application/json',
-        },
-        timeout: 90000,
-      }
+      { timeout: 90000 }
     );
   } catch (err) {
-    const apiErr = err.response?.data?.error?.message || err.response?.data || err.message;
-    console.error('[AgentRouter Error]', JSON.stringify(apiErr));
-    return res.status(502).json({ error: `AgentRouter API error: ${JSON.stringify(apiErr)}` });
+    const detail = err.response?.data?.error?.message || err.response?.data || err.message;
+    console.error('[Gemini Error]', JSON.stringify(detail));
+    return res.status(502).json({ error: `Gemini API error: ${JSON.stringify(detail)}` });
   }
 
-  // Log full response structure (visible in Render logs — helps debug)
-  console.log('[AgentRouter] status:', apiRes.status);
-  console.log('[AgentRouter] stop_reason:', apiRes.data?.stop_reason);
-  console.log('[AgentRouter] content blocks:', apiRes.data?.content?.length);
-  console.log('[AgentRouter] usage:', JSON.stringify(apiRes.data?.usage));
+  // Parse Gemini response
+  const candidate  = apiRes.data?.candidates?.[0];
+  const finishReason = candidate?.finishReason;
+  const rawText    = candidate?.content?.parts?.map(p => p.text || '').join('') || '';
 
-  // Extract text from content blocks — handle all block types robustly
-  let rawText = '';
-  const contentBlocks = apiRes.data?.content || [];
+  console.log('[Gemini] finish:', finishReason, '| chars:', rawText.length, '| preview:', rawText.slice(0, 80));
 
-  for (const block of contentBlocks) {
-    if (block.type === 'text' && block.text) {
-      rawText += block.text;
-    }
-  }
-
-  // Fallback: some router wrappers return flat string instead of blocks
-  if (!rawText && typeof apiRes.data?.content === 'string') {
-    rawText = apiRes.data.content;
-  }
-  if (!rawText && typeof apiRes.data?.completion === 'string') {
-    rawText = apiRes.data.completion;
+  if (finishReason === 'SAFETY') {
+    return res.status(502).json({ error: 'Gemini safety filter triggered. Try again.' });
   }
 
   if (!rawText) {
-    // Log full response so user can see in Render logs what went wrong
-    console.error('[Empty Response] Full data:', JSON.stringify(apiRes.data).slice(0, 800));
+    console.error('[Gemini] Empty response:', JSON.stringify(apiRes.data).slice(0, 400));
     return res.status(502).json({
-      error: 'Empty response from AI model. Check Render logs for full response details.',
-      hint:  'Verify AGENTROUTER_API_KEY is valid and has credits at agentrouter.org/console',
+      error: 'Empty response from Gemini. Check API key and billing.',
       debug: JSON.stringify(apiRes.data).slice(0, 300),
     });
   }
-
-  console.log('[AgentRouter] Text length:', rawText.length, '| Preview:', rawText.slice(0, 80));
 
   const signal = parseSignal(rawText);
   signal.symbol       = cleanSymbol;
@@ -687,59 +680,47 @@ Please analyze all provided data — chart image + candles — and return your t
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => {
   res.json({
-    status:  'ok',
-    version: '2.0',
-    model:   'claude-opus-4-8',
-    router:  AGENTROUTER_BASE_URL,
-    apiKey:  AGENTROUTER_KEY ? '✓ set' : '✗ missing',
+    status: 'ok',
+    version: '3.0',
+    model:   GEMINI_MODEL,
+    apiKey:  GEMINI_KEY ? '✓ set' : '✗ missing',
   });
 });
 
-// ── Test AI endpoint — open in browser to diagnose AgentRouter ────────────────
-// URL: https://your-render-url.onrender.com/test-ai
+// ── Test AI — open in browser to verify Gemini is working ────────────────────
 app.get('/test-ai', async (_req, res) => {
-  if (!AGENTROUTER_KEY) {
-    return res.status(500).json({ error: 'AGENTROUTER_API_KEY not set in environment' });
+  if (!GEMINI_KEY) {
+    return res.status(500).json({ error: 'GEMINI_API_KEY not set in environment' });
   }
-
-  let apiRes;
   try {
-    apiRes = await axios.post(
-      `${AGENTROUTER_BASE_URL}/v1/messages`,
+    const r = await axios.post(
+      `${GEMINI_BASE_URL}/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_KEY}`,
       {
-        model:      'claude-opus-4-8',
-        max_tokens: 50,
-        messages:   [{ role: 'user', content: 'Reply with exactly: WORKING' }],
+        contents: [{ role: 'user', parts: [{ text: 'Reply with exactly: WORKING' }] }],
+        generationConfig: { maxOutputTokens: 20 },
       },
-      {
-        headers: {
-          'x-api-key':         AGENTROUTER_KEY,
-          'anthropic-version': '2023-06-01',
-          'content-type':      'application/json',
-        },
-        timeout: 30000,
-      }
+      { timeout: 20000 }
     );
+    const text = r.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    return res.json({
+      test:         text ? 'PASSED ✅' : 'FAILED ❌',
+      reply:        text,
+      model:        GEMINI_MODEL,
+      finish:       r.data?.candidates?.[0]?.finishReason,
+    });
   } catch (err) {
     return res.status(502).json({
-      test:   'FAILED — threw error',
-      error:  err.response?.data || err.message,
-      status: err.response?.status,
+      test:  'FAILED ❌',
+      error: err.response?.data?.error?.message || err.message,
     });
   }
-
-  // Return EVERYTHING so we can see the real response structure
-  return res.json({
-    http_status:  apiRes.status,
-    FULL_RESPONSE: apiRes.data,
-    keys_in_data: Object.keys(apiRes.data || {}),
-  });
 });
 
 app.listen(PORT, () => {
   console.log(`\n✅  SMC Signal Backend running at http://localhost:${PORT}`);
-  console.log(`    Key:     ${AGENTROUTER_KEY ? '✓ loaded' : '✗ NOT SET — add to .env'}`);
-  console.log(`    Sources: Binance (crypto) + Yahoo Finance (forex/gold/indices)`);
+  console.log(`    Model:   ${GEMINI_MODEL}`);
+  console.log(`    Key:     ${GEMINI_KEY ? '✓ loaded' : '✗ NOT SET — add GEMINI_API_KEY to .env'}`);
+  console.log(`    Sources: Binance/MEXC/Gate.io/KuCoin (crypto) + Yahoo (forex/indices)`);
   console.log(`    Health:  http://localhost:${PORT}/health\n`);
 });
 
