@@ -731,8 +731,8 @@ Please analyze all provided data — chart image + candles — and return your t
         ],
         generationConfig: {
           maxOutputTokens: 4000,
-          temperature:     0.4,
-          topP:            0.95,
+          temperature:     0.8,
+          topP:            1,
         },
         // Prevent safety filters blocking trading content
         safetySettings: [
