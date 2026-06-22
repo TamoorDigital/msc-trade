@@ -69,7 +69,7 @@ TRADE RULES:
 
 * Minimum Risk:Reward = 1:2
 * Ideal Risk:Reward >= 1:3
-* If setup quality < 80% -> return WAIT
+
 * Do NOT force trades
 * Avoid trades in choppy or ranging markets unless breakout confirmed
 OUTPUT FORMAT:
