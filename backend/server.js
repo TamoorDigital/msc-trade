@@ -92,30 +92,32 @@ REASONING:
 * Session Context:
 * Confluence Summary:
 
-If WAIT:
+If WAIT — YOU MUST USE THIS EXACT FORMAT, NO EXCEPTIONS:
 TRADE: WAIT
 
 REASON:
-* Why no valid setup exists right now (be specific about what is missing)
+[Write 1-2 sentences explaining exactly why no trade is valid right now]
 
 LONG SETUP:
-* Trigger: [exact price level OR condition that would make a long valid]
-* Confirmation: [candle pattern / timeframe signal required, e.g. "4H closes green above 63800"]
-* Entry: [price]
-* Stop Loss: [price]
-* Take Profit 1: [price]
-* Take Profit 2: [price]
+Trigger: [specific price level or candle condition that must happen first, e.g. "price pulls back to 63800 demand zone"]
+Confirmation: [exact signal needed, e.g. "4H candle closes bullish above 63850"]
+Entry: [price]
+Stop Loss: [price]
+Take Profit 1: [price]
+Take Profit 2: [price]
 
 SHORT SETUP:
-* Trigger: [exact price level OR condition that would make a short valid]
-* Confirmation: [candle pattern / timeframe signal required, e.g. "4H bearish rejection at 64500"]
-* Entry: [price]
-* Stop Loss: [price]
-* Take Profit 1: [price]
-* Take Profit 2: [price]
+Trigger: [specific price level or candle condition, e.g. "price rejects at 64500 supply zone"]
+Confirmation: [exact signal needed, e.g. "4H candle closes bearish below 64400"]
+Entry: [price]
+Stop Loss: [price]
+Take Profit 1: [price]
+Take Profit 2: [price]
 
 WHAT TO WATCH:
-* Key levels to monitor
+[List key price levels to monitor, separated by commas]
+
+CRITICAL: LONG SETUP and SHORT SETUP sections are MANDATORY even for WAIT signals. Always give both. Never skip them. Always provide specific prices, not vague descriptions.
 
 IMPORTANT RULES:
 
@@ -576,32 +578,38 @@ function parseSignal(text) {
 
   } else {
     // ── WAIT parsing ──
-    const reasonM = text.match(/REASON[*\s:]*([\s\S]+?)(?:LONG\s*SETUP|SHORT\s*SETUP|WHAT\s*TO\s*WATCH|$)/i);
-    if (reasonM) result.reason = reasonM[1].replace(/^[*\s:]+/, '').trim();
 
-    // Extract LONG SETUP block
-    const longIdx = text.search(/LONG\s*SETUP/i);
-    if (longIdx !== -1) {
-      const nextIdx = text.search(/SHORT\s*SETUP|WHAT\s*TO\s*WATCH/i);
-      result.longSetup = text
-        .slice(longIdx, nextIdx !== -1 ? nextIdx : undefined)
-        .replace(/^LONG\s*SETUP[*\s:\-—]*/i, '')
-        .trim();
+    // REASON — everything between REASON: and the next section header
+    const reasonM = text.match(/REASON[*\s:\-—]*([\s\S]+?)(?=\n\s*(?:LONG\s*SETUP|SHORT\s*SETUP|WHAT\s*TO\s*WATCH|\*{2}LONG|\*{2}SHORT))/i);
+    if (reasonM) result.reason = reasonM[1].replace(/^\s*\*+\s*/gm, '').trim();
+    else {
+      // Fallback: first paragraph after TRADE: WAIT
+      const afterWait = text.replace(/.*TRADE\s*:\s*WAIT\s*/is, '').trim();
+      const firstBlock = afterWait.split(/\n\s*\n/)[0];
+      if (firstBlock && !firstBlock.match(/LONG|SHORT|WATCH/i))
+        result.reason = firstBlock.replace(/^REASON[*\s:\-—]*/i,'').replace(/^\s*\*+\s*/gm,'').trim();
     }
 
-    // Extract SHORT SETUP block
-    const shortIdx = text.search(/SHORT\s*SETUP/i);
-    if (shortIdx !== -1) {
-      const afterShort = text.slice(shortIdx);
-      const endIdx = afterShort.search(/\nWHAT\s*TO\s*WATCH/i);
-      result.shortSetup = afterShort
-        .slice(0, endIdx !== -1 ? endIdx : undefined)
-        .replace(/^SHORT\s*SETUP[*\s:\-—]*/i, '')
-        .trim();
+    // LONG SETUP — flexible: "LONG SETUP:", "**LONG SETUP**:", "Long Setup:", "LONG:"
+    const longMatch = text.match(/(?:\*{0,2}LONG\s*SETUP\*{0,2}|LONG\s*ENTRY\s*SETUP)[*\s:\-—]*([\s\S]+?)(?=\n\s*(?:\*{0,2}SHORT\s*SETUP|\*{0,2}SHORT\s*ENTRY|WHAT\s*TO\s*WATCH|\*{2}SHORT))/i);
+    if (longMatch) {
+      result.longSetup = longMatch[1].replace(/^\s*\*+\s*/gm, '* ').trim();
     }
 
-    const watchM = text.match(/WHAT\s*TO\s*WATCH[*\s:]*([\s\S]+?)$/i);
-    if (watchM) result.watchFor = watchM[1].replace(/^[*\s:]+/, '').trim();
+    // SHORT SETUP
+    const shortMatch = text.match(/(?:\*{0,2}SHORT\s*SETUP\*{0,2}|SHORT\s*ENTRY\s*SETUP)[*\s:\-—]*([\s\S]+?)(?=\n\s*(?:WHAT\s*TO\s*WATCH|\*{0,2}WHAT|$))/i);
+    if (shortMatch) {
+      result.shortSetup = shortMatch[1].replace(/^\s*\*+\s*/gm, '* ').trim();
+    }
+
+    // WHAT TO WATCH
+    const watchMatch = text.match(/WHAT\s*TO\s*WATCH[*\s:\-—]*([\s\S]+?)(?=\nCRITICAL|$)/i);
+    if (watchMatch) {
+      result.watchFor = watchMatch[1]
+        .replace(/^\s*\*+\s*/gm, '')
+        .replace(/CRITICAL.*$/is, '')
+        .trim();
+    }
   }
 
   return result;
