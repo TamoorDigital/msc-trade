@@ -58,20 +58,27 @@ STEP 6: SESSION CONTEXT
 * Avoid low-volume/no-liquidity times
 STEP 7: CONFLUENCE CHECK
 
-* Only proceed if at least 3 strong confluences align: (Structure + Liquidity + OB/FVG + Session + Trend)
+* Proceed with a signal if at least 2 confluences align (e.g. Structure + OB, or Trend + FVG, or Liquidity + Session)
+* 3+ confluences = high confidence signal
+* 2 confluences = valid signal — DO NOT downgrade to WAIT
+* 1 confluence only = WAIT
+
 DECISION LOGIC:
 You must choose ONLY ONE:
 
 1. LONG
 2. SHORT
-3. WAIT (no trade)
+3. WAIT (no trade) — use SPARINGLY, only when market is genuinely unclear
+
 TRADE RULES:
 
 * Minimum Risk:Reward = 1:2
 * Ideal Risk:Reward >= 1:3
-
-* Do NOT force trades
-* Avoid trades in choppy or ranging markets unless breakout confirmed
+* If setup quality < 60% → return WAIT
+* If 4H trend is clearly established (consistent HH+HL or LH+LL) AND price is at a key SMC level (OB / FVG / SSL / BSL / S&R) → you MUST give a signal in the trend direction. Do NOT return WAIT.
+* WAIT is ONLY valid when: market is in genuine consolidation/range with no clear structure, OR price is in the middle of a range far from any key level
+* A clear trend visible on the chart is SUFFICIENT reason to trade — do not demand perfect conditions
+* Do NOT over-filter. Excessive WAIT signals are a failure of analysis, not caution.
 OUTPUT FORMAT:
 If LONG or SHORT:
 Return in this EXACT format:
@@ -137,15 +144,17 @@ WHAT TO WATCH:
 IMPORTANT RULES:
 
 * Think step-by-step before answering
-* Prioritize accuracy over frequency
+* Balance accuracy WITH actionability — too many WAITs is as bad as bad signals
 * Do not hallucinate levels
 * Use both image and candle data together
-* If image conflicts with data -> trust candle data more
+* If image conflicts with data → trust candle data more
 * Only give ONE final decision
 * Be precise, not verbose
+* When the chart shows a clear trend direction, COMMIT to a signal — do not hide behind WAIT
+* A good trader reads the market and acts — not waits for perfect conditions that never come
 
 GOAL:
-Act like a professional trader managing real capital. Your priority is capital preservation and high-probability execution.`;
+Act like an experienced prop trader who needs to find trades, not avoid them. Capital preservation matters, but so does seizing clear opportunities. If the trend is obvious, trade it.`;
 
 // ── Symbol classifier ─────────────────────────────────────────────────────────
 // Returns 'binance' | 'yahoo'
@@ -520,8 +529,34 @@ function getSession() {
 }
 
 // ── Signal parser — flexible regex handles Gemini's varied output style ───────
-function parseSignal(text) {
-  const result = { rawText: text };
+function parseSignal(rawText) {
+  const result = { rawText };
+
+  // ── NORMALIZE: insert newlines before section headers ──
+  // Gemini often outputs everything flat on one line without line breaks.
+  // This ensures the regex-based section splitting always works.
+  const SECTIONS = [
+    'TRADE', 'REASON', 'LONG SETUP', 'SHORT SETUP',
+    'WHAT TO WATCH', 'REASONING', 'IMPORTANT',
+  ];
+  const FIELDS = [
+    'Trigger', 'Confirmation', 'Entry', 'Stop Loss',
+    'Take Profit 1', 'Take Profit 2', 'Take Profit 3',
+  ];
+
+  let text = rawText;
+
+  // Insert newline before each section header if not already on its own line
+  SECTIONS.forEach(s => {
+    const escaped = s.replace(/\s+/g, '\\s*');
+    text = text.replace(new RegExp(`([^\\n])\\s{0,3}(${escaped}\\s*:)`, 'gi'), '$1\n$2');
+  });
+
+  // Insert newline before each field label inside setup blocks
+  FIELDS.forEach(f => {
+    const escaped = f.replace(/\s+/g, '\\s*');
+    text = text.replace(new RegExp(`([^\\n])\\s{0,3}(${escaped}\\s*:)`, 'gi'), '$1\n$2');
+  });
 
   // ── Trade direction ──
   // Handles: "TRADE: LONG", "**TRADE:** SHORT", "Trade: WAIT", "DIRECTION: LONG"
@@ -592,38 +627,34 @@ function parseSignal(text) {
     }
 
   } else {
-    // ── WAIT parsing ──
+    // ── WAIT parsing — newline-independent ──
+    // Gemini often returns everything on one line with no \n between sections.
+    // All patterns use \s+ (any whitespace) NOT \n as section boundaries.
 
-    // REASON — everything between REASON: and the next section header
-    const reasonM = text.match(/REASON[*\s:\-—]*([\s\S]+?)(?=\n\s*(?:LONG\s*SETUP|SHORT\s*SETUP|WHAT\s*TO\s*WATCH|\*{2}LONG|\*{2}SHORT))/i);
-    if (reasonM) result.reason = reasonM[1].replace(/^\s*\*+\s*/gm, '').trim();
-    else {
-      // Fallback: first paragraph after TRADE: WAIT
-      const afterWait = text.replace(/.*TRADE\s*:\s*WAIT\s*/is, '').trim();
-      const firstBlock = afterWait.split(/\n\s*\n/)[0];
-      if (firstBlock && !firstBlock.match(/LONG|SHORT|WATCH/i))
-        result.reason = firstBlock.replace(/^REASON[*\s:\-—]*/i,'').replace(/^\s*\*+\s*/gm,'').trim();
-    }
+    const sec = (startPat, ...endPats) => {
+      const sm = text.match(startPat);
+      if (!sm) return null;
+      let chunk = text.slice(sm.index + sm[0].length);
+      for (const ep of endPats) {
+        const em = chunk.match(ep);
+        if (em) chunk = chunk.slice(0, em.index);
+      }
+      return chunk.trim();
+    };
 
-    // LONG SETUP — flexible: "LONG SETUP:", "**LONG SETUP**:", "Long Setup:", "LONG:"
-    const longMatch = text.match(/(?:\*{0,2}LONG\s*SETUP\*{0,2}|LONG\s*ENTRY\s*SETUP)[*\s:\-—]*([\s\S]+?)(?=\n\s*(?:\*{0,2}SHORT\s*SETUP|\*{0,2}SHORT\s*ENTRY|WHAT\s*TO\s*WATCH|\*{2}SHORT))/i);
-    if (longMatch) {
-      result.longSetup = longMatch[1].replace(/^\s*\*+\s*/gm, '* ').trim();
-    }
+    // Add newlines before known sub-labels so text is readable in popup
+    const fmtSetup = t => t
+      ? t.replace(/\s+(Trigger:|Confirmation:|Entry:|Stop\s*Loss:|Take\s*Profit\s*\d*:)/gi, '\n$1').trim()
+      : null;
 
-    // SHORT SETUP
-    const shortMatch = text.match(/(?:\*{0,2}SHORT\s*SETUP\*{0,2}|SHORT\s*ENTRY\s*SETUP)[*\s:\-—]*([\s\S]+?)(?=\n\s*(?:WHAT\s*TO\s*WATCH|\*{0,2}WHAT|$))/i);
-    if (shortMatch) {
-      result.shortSetup = shortMatch[1].replace(/^\s*\*+\s*/gm, '* ').trim();
-    }
+    result.reason    = sec(/REASON\s*:/i,       /\s+LONG\s*SETUP\s*:/i,  /\s+SHORT\s*SETUP\s*:/i, /\s+WHAT\s*TO\s*WATCH\s*:/i);
+    result.longSetup = fmtSetup(sec(/LONG\s*SETUP\s*:/i,  /\s+SHORT\s*SETUP\s*:/i, /\s+WHAT\s*TO\s*WATCH\s*:/i));
+    result.shortSetup= fmtSetup(sec(/SHORT\s*SETUP\s*:/i, /\s+WHAT\s*TO\s*WATCH\s*:/i));
+    result.watchFor  = sec(/WHAT\s*TO\s*WATCH\s*:/i);
 
-    // WHAT TO WATCH
-    const watchMatch = text.match(/WHAT\s*TO\s*WATCH[*\s:\-—]*([\s\S]+?)(?=\nCRITICAL|$)/i);
-    if (watchMatch) {
-      result.watchFor = watchMatch[1]
-        .replace(/^\s*\*+\s*/gm, '')
-        .replace(/CRITICAL.*$/is, '')
-        .trim();
+    // Clean up "HERE IS A COMPLETE EXAMPLE" injected from prompt if leaked into watchFor
+    if (result.watchFor) {
+      result.watchFor = result.watchFor.replace(/HERE\s*IS.*$/is, '').trim();
     }
   }
 
@@ -731,8 +762,8 @@ Please analyze all provided data — chart image + candles — and return your t
         ],
         generationConfig: {
           maxOutputTokens: 4000,
-          temperature:     0.8,
-          topP:            1,
+          temperature:     0.4,
+          topP:            0.95,
         },
         // Prevent safety filters blocking trading content
         safetySettings: [
