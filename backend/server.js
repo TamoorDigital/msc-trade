@@ -80,25 +80,39 @@ TRADE RULES:
 * A clear trend visible on the chart is SUFFICIENT reason to trade — do not demand perfect conditions
 * Do NOT over-filter. Excessive WAIT signals are a failure of analysis, not caution.
 OUTPUT FORMAT:
-If LONG or SHORT:
-Return in this EXACT format:
+If LONG or SHORT — COPY THIS EXACT FORMAT (do NOT change the labels, do NOT skip any line):
 TRADE: LONG / SHORT
 ENTRY: [price]
 STOP LOSS: [price]
 TAKE PROFIT 1: [price]
 TAKE PROFIT 2: [price]
 TAKE PROFIT 3: [price]
-RISK REWARD: [e.g., 1:3]
-PROBABILITY: [0-100%]
-
+RISK REWARD: [e.g. 1:3]
+PROBABILITY: [0-100]%
 REASONING:
+Market Structure: [text]
+Liquidity: [text]
+Entry Model: [text]
+Session Context: [text]
+Confluence Summary: [text]
 
-* Market Structure:
-* Liquidity:
-* Entry Model (OB/FVG/etc):
-* Session Context:
-* Confluence Summary:
+HERE IS A COMPLETE EXAMPLE OF A CORRECT SHORT RESPONSE — FOLLOW THIS EXACTLY, including every label and the order of lines:
+TRADE: SHORT
+ENTRY: 64340
+STOP LOSS: 64550
+TAKE PROFIT 1: 64000
+TAKE PROFIT 2: 63760
+TAKE PROFIT 3: 63250
+RISK REWARD: 1:2.9
+PROBABILITY: 78%
+REASONING:
+Market Structure: 4H shows clear bearish BOS with lower highs and lower lows; 1H confirms downtrend continuation.
+Liquidity: Equal highs near 64550 mark a buy-side liquidity pool already swept; sell-side liquidity sits below 63250.
+Entry Model: Price retracing into a bearish order block / FVG at 64340 before expected continuation lower.
+Session Context: New York session, elevated volatility supports continuation moves.
+Confluence Summary: Bearish structure + OB retest + liquidity sweep + session timing align for a high-probability short.
 
+CRITICAL: RISK REWARD, PROBABILITY, and the full REASONING block are MANDATORY on every LONG/SHORT signal. Never omit them, never leave them blank, and never skip straight from PROBABILITY to the next signal without the REASONING section.
 If WAIT — COPY THIS EXACT FORMAT (do NOT change the labels):
 TRADE: WAIT
 REASON:
@@ -163,21 +177,28 @@ Act like an experienced prop trader who needs to find trades, not avoid them. Ca
 function normalizeSymbol(raw) {
   let s = raw || '';
 
-  // 1. Strip exchange prefix:  "BINANCE:BTCUSDT.P" → "BTCUSDT.P"
+  // 1. Strip exchange prefix: "BINANCE:BTCUSDT.P" → "BTCUSDT.P"
   s = s.replace(/^[A-Z0-9]+:/i, '');
 
-  // 2. Strip perpetual / futures suffixes BEFORE removing dots
-  //    These show up on Binance Futures, Bybit, OKX charts
-  s = s.replace(/\.P$/i, '');          // BTCUSDT.P  → BTCUSDT
+  // 2. Strip perpetual/futures suffixes BEFORE removing non-alphanumeric
+  s = s.replace(/\.P$/i, '');          // BTCUSDT.P   → BTCUSDT
   s = s.replace(/\.PERP$/i, '');       // BTCUSDT.PERP → BTCUSDT
   s = s.replace(/_PERP$/i, '');        // BTCUSDT_PERP → BTCUSDT
-  s = s.replace(/PERP$/i, '');         // BTCUSDTPERP → BTCUSDT
-  s = s.replace(/\.USD$/i, 'USDT');    // Some exchanges use .USD instead of USDT
+  s = s.replace(/PERP$/i, '');         // BTCUSDTPERP  → BTCUSDT
+  s = s.replace(/\.USD$/i, 'USDT');    // BTCUSD.USD   → BTCUSDUSDT (handle below)
 
-  // 3. Remove any remaining non-alphanumeric characters
+  // 3. Remove non-alphanumeric (this turns "SOLUSDT.P" → "SOLUSDTP" if dot survived)
   s = s.replace(/[^A-Z0-9]/gi, '').toUpperCase();
 
-  return s;
+  // 4. After dot removal, a trailing P from .P suffix may still remain
+  //    e.g. URL-encoded dot was stripped → "SOLUSDTP" → strip the P
+  //    Only strip if: ends with [USDT|USDC|BTC|ETH|BNB]P
+  s = s.replace(/(USDT|USDC|BTC|ETH|BNB|USD)P$/i, '$1');
+
+  // 5. Fix accidental double USDT from .USD handling
+  s = s.replace(/USDTUSDT$/i, 'USDT');
+
+  return s.toUpperCase();
 }
 
 function detectDataSource(symbol) {
@@ -542,6 +563,9 @@ function parseSignal(rawText) {
   const FIELDS = [
     'Trigger', 'Confirmation', 'Entry', 'Stop Loss',
     'Take Profit 1', 'Take Profit 2', 'Take Profit 3',
+    'Risk Reward', 'Risk to Reward', 'Risk/Reward', 'Probability',
+    'Market Structure', 'Liquidity', 'Entry Model', 'Session Context',
+    'Confluence Summary',
   ];
 
   let text = rawText;
@@ -554,7 +578,7 @@ function parseSignal(rawText) {
 
   // Insert newline before each field label inside setup blocks
   FIELDS.forEach(f => {
-    const escaped = f.replace(/\s+/g, '\\s*');
+    const escaped = f.replace(/[\s/]+/g, '[\\s/]*');
     text = text.replace(new RegExp(`([^\\n])\\s{0,3}(${escaped}\\s*:)`, 'gi'), '$1\n$2');
   });
 
@@ -617,13 +641,25 @@ function parseSignal(rawText) {
     const probM = text.match(/PROBABILITY[*\s:]+\*{0,2}~?([\d.]+)\s*%?/i);
     if (probM) result.probability = parseFloat(probM[1]);
 
-    // Reasoning — grab everything after the label
+    // Reasoning — grab everything after REASONING: label, stop at CRITICAL or end
     const rIdx = text.search(/REASONING[*\s:]*/i);
     if (rIdx !== -1) {
       result.reasoning = text
         .slice(rIdx)
         .replace(/^REASONING[*\s:]*/i, '')
+        .replace(/\s*CRITICAL:[\s\S]*$/i, '')   // strip any trailing CRITICAL note
+        .replace(/^\s*\*+\s*/gm, '')            // strip leading bullets
         .trim();
+    }
+
+    // If reasoning is still empty/missing, build it from sub-fields
+    if (!result.reasoning) {
+      const fields = ['Market Structure','Liquidity','Entry Model','Session Context','Confluence Summary'];
+      const parts = fields.map(f => {
+        const m = text.match(new RegExp(`${f}[*\\s:]+([^\\n]+)`, 'i'));
+        return m ? `${f}: ${m[1].trim()}` : null;
+      }).filter(Boolean);
+      if (parts.length) result.reasoning = parts.join('\n');
     }
 
   } else {
